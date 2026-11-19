@@ -19,7 +19,7 @@ namespace local_partnerdomains;
 /**
  * Tests for the manager class.
  *
- * Run with: vendor/bin/phpunit --filter local_partnerdomains
+ * Run with: vendor/bin/phpunit local/partnerdomains/tests/manager_test.php
  *
  * @package    local_partnerdomains
  * @copyright  2026 Fabian Kaiser
@@ -28,155 +28,392 @@ namespace local_partnerdomains;
 #[\PHPUnit\Framework\Attributes\CoversClass(manager::class)]
 final class manager_test extends \advanced_testcase {
 
+    /** @var int Cohort of the partner rule. */
+    private $partners;
+
+    /** @var int Cohort of the staff rule. */
+    private $staff;
+
     /**
-     * Common setup.
+     * Two rules: partners (two domains + wildcard) and staff (one domain).
      */
     protected function setUp(): void {
-        global $CFG;
+        global $CFG, $DB;
         parent::setUp();
         $this->resetAfterTest();
         require_once($CFG->dirroot . '/cohort/lib.php');
+        require_once($CFG->dirroot . '/user/lib.php');
+
         set_config('enabled', 1, 'local_partnerdomains');
         set_config('removeunmatched', 1, 'local_partnerdomains');
-        set_config('domains', "partner-a.ch\n@Partner-B.com  # comment\n*.konzern.de\n", 'local_partnerdomains');
+        set_config('sendmail', 1, 'local_partnerdomains');
+        set_config('unmatchedaction', manager::ACTION_NONE, 'local_partnerdomains');
+        set_config('exemptauths', 'manual,nologin,webservice', 'local_partnerdomains');
+        set_config('mailsubject', 'Access to {sitename}', 'local_partnerdomains');
+        set_config('mailbody', '<p>Hello {firstname} ({email})</p>', 'local_partnerdomains');
+        unset_config('blockeddomains', 'local_partnerdomains');
+
+        $p = manager::save_rule((object) ['name' => 'Partner', 'domains' => "partner-a.ch\n@Partner-B.com # c\n*.konzern.de",
+            'cohortid' => 0, 'newcohortname' => 'Partner', 'enabled' => 1]);
+        $s = manager::save_rule((object) ['name' => 'Staff', 'domains' => 'firma.ch', 'cohortid' => 0,
+            'newcohortname' => 'Staff', 'enabled' => 1]);
+        $this->partners = (int) $DB->get_field(manager::TABLE_RULE, 'cohortid', ['id' => $p]);
+        $this->staff = (int) $DB->get_field(manager::TABLE_RULE, 'cohortid', ['id' => $s]);
     }
 
     /**
-     * Helper: is the user in the partner cohort?
+     * Switches suspension on, as the settings page would.
+     *
+     * @param int|null $blockfrom Defaults to one minute ago.
+     */
+    private function enable_suspension(?int $blockfrom = null): void {
+        set_config('unmatchedaction', manager::ACTION_SUSPEND, 'local_partnerdomains');
+        set_config('blockactive', 1, 'local_partnerdomains');
+        set_config('blockfrom', $blockfrom ?? time() - MINSECS, 'local_partnerdomains');
+    }
+
+    /**
+     * Creates a user with the given address (auth "email" = self-registration by default).
+     *
+     * @param string $email
+     * @param array $extra
+     * @return \stdClass
+     */
+    private function user(string $email, array $extra = []): \stdClass {
+        return $this->getDataGenerator()->create_user(['email' => $email, 'auth' => 'email'] + $extra);
+    }
+
+    /**
+     * Whether the user is suspended right now.
      *
      * @param int $userid
      * @return bool
      */
-    private function is_member(int $userid): bool {
-        return cohort_is_member(manager::get_cohort()->id, $userid);
+    private function is_suspended(int $userid): bool {
+        global $DB;
+        return (bool) $DB->get_field('user', 'suspended', ['id' => $userid]);
     }
 
     public function test_parse_domains(): void {
-        $parsed = manager::parse_domains("a.ch\n\n # only comment\n@B.COM\nnot a domain\ngmail.com\n*.x.de\na.ch\n*.ch");
-        $this->assertSame(['a.ch', 'b.com', '*.x.de'], $parsed['valid']);
+        $parsed = manager::parse_domains("a.ch, b.ch\n\n # only comment\n@B.COM\nnot a domain\ngmail.com\n*.x.de\na.ch\n*.ch");
+        $this->assertSame(['a.ch', 'b.ch', 'b.com', '*.x.de'], $parsed['valid']);
         $this->assertSame(['not a domain', '*.ch'], $parsed['invalid']);
         $this->assertSame(['gmail.com'], $parsed['blocked']);
     }
 
-    public function test_match_email(): void {
+    public function test_blocked_domains_are_configurable(): void {
+        set_config('blockeddomains', "example.org\nfoo.com", 'local_partnerdomains');
+        $parsed = manager::parse_domains("gmail.com\nexample.org");
+        $this->assertSame(['gmail.com'], $parsed['valid']);
+        $this->assertSame(['example.org'], $parsed['blocked']);
+    }
+
+    public function test_match_rules(): void {
         $rules = manager::get_rules();
-        $this->assertSame('partner-a.ch', manager::match_email('Max@Partner-A.ch', $rules));
-        $this->assertSame('partner-b.com', manager::match_email('x@partner-b.com', $rules));
-        $this->assertSame('*.konzern.de', manager::match_email('x@werk1.konzern.de', $rules));
-        $this->assertNull(manager::match_email('x@konzern.de', $rules));
-        $this->assertNull(manager::match_email('x@notpartner-a.ch', $rules));
-        $this->assertNull(manager::match_email('x@partner-a.ch.evil.com', $rules));
-        $this->assertNull(manager::match_email('x@gmail.com', ['gmail.com']));
-        $this->assertNull(manager::match_email('kein-at-zeichen', $rules));
+        $names = function(string $email) use ($rules) {
+            return array_values(array_map(fn($r) => $r->name, manager::match_rules($email, $rules)));
+        };
+        $this->assertSame(['Partner'], $names('Max@Partner-A.ch'));
+        $this->assertSame(['Partner'], $names('x@werk1.konzern.de'));
+        $this->assertSame(['Staff'], $names('x@firma.ch'));
+        $this->assertSame([], $names('x@konzern.de'));
+        $this->assertSame([], $names('x@partner-a.ch.evil.com'));
+        $this->assertSame([], $names('kein-at-zeichen'));
     }
 
-    public function test_cohort_created_once(): void {
-        $first = manager::get_cohort();
-        $second = manager::get_cohort();
-        $this->assertSame($first->id, $second->id);
-        $this->assertSame(manager::COHORT_IDNUMBER, $first->idnumber);
+    public function test_user_gets_cohort_of_matching_rule(): void {
+        $partner = $this->user('anna@partner-a.ch');
+        $staff = $this->user('ben@firma.ch');
+        $this->assertTrue(cohort_is_member($this->partners, $partner->id));
+        $this->assertFalse(cohort_is_member($this->staff, $partner->id));
+        $this->assertTrue(cohort_is_member($this->staff, $staff->id));
     }
 
-    public function test_user_created_matching_is_added(): void {
-        $user = $this->getDataGenerator()->create_user(['email' => 'anna@partner-a.ch']);
-        $this->assertTrue($this->is_member($user->id));
+    public function test_domain_in_two_rules_gives_both_cohorts(): void {
+        manager::save_rule((object) ['name' => 'Extra', 'domains' => 'firma.ch', 'cohortid' => $this->partners, 'enabled' => 1]);
+        $user = $this->user('ben@firma.ch');
+        $this->assertTrue(cohort_is_member($this->staff, $user->id));
+        $this->assertTrue(cohort_is_member($this->partners, $user->id));
     }
 
-    public function test_user_created_other_domain_is_not_added(): void {
-        $user = $this->getDataGenerator()->create_user(['email' => 'anna@example.org']);
-        $this->assertFalse($this->is_member($user->id));
-    }
-
-    public function test_unconfirmed_user_is_added_after_confirmation(): void {
+    public function test_disabled_rule_is_ignored(): void {
         global $DB;
-        $user = $this->getDataGenerator()->create_user(['email' => 'anna@partner-a.ch', 'confirmed' => 0]);
-        $this->assertFalse($this->is_member($user->id));
-
-        $DB->set_field('user', 'confirmed', 1, ['id' => $user->id]);
-        $this->assertSame('added', manager::sync_user($user->id));
-        $this->assertTrue($this->is_member($user->id));
+        $ruleid = $DB->get_field(manager::TABLE_RULE, 'id', ['name' => 'Staff']);
+        manager::set_rule_enabled($ruleid, false);
+        $user = $this->user('ben@firma.ch');
+        $this->assertFalse(cohort_is_member($this->staff, $user->id));
     }
 
-    public function test_email_change_removes_auto_member(): void {
-        global $CFG;
-        require_once($CFG->dirroot . '/user/lib.php');
-        $user = $this->getDataGenerator()->create_user(['email' => 'anna@partner-a.ch']);
-        $this->assertTrue($this->is_member($user->id));
-
-        user_update_user((object) ['id' => $user->id, 'email' => 'anna@example.org'], false, true);
-        $this->assertFalse($this->is_member($user->id));
+    public function test_email_change_moves_user(): void {
+        $user = $this->user('anna@partner-a.ch');
+        user_update_user((object) ['id' => $user->id, 'email' => 'anna@firma.ch'], false, true);
+        $this->assertFalse(cohort_is_member($this->partners, $user->id));
+        $this->assertTrue(cohort_is_member($this->staff, $user->id));
     }
 
     public function test_manual_member_is_never_removed(): void {
-        $user = $this->getDataGenerator()->create_user(['email' => 'einzelfirma@gmail.com']);
-        cohort_add_member(manager::get_cohort()->id, $user->id);
-
-        $stats = manager::sync_all();
-        $this->assertSame(0, $stats['removed']);
-        $this->assertTrue($this->is_member($user->id));
+        $user = $this->user('einzelfirma@gmail.com');
+        cohort_add_member($this->partners, $user->id);
+        manager::sync_all();
+        $this->assertTrue(cohort_is_member($this->partners, $user->id));
     }
 
-    public function test_removing_domain_removes_users_on_sync(): void {
-        $a = $this->getDataGenerator()->create_user(['email' => 'anna@partner-a.ch']);
-        $b = $this->getDataGenerator()->create_user(['email' => 'ben@partner-b.com']);
-
-        set_config('domains', 'partner-b.com', 'local_partnerdomains');
-        $stats = manager::sync_all();
-
-        $this->assertSame(1, $stats['removed']);
-        $this->assertFalse($this->is_member($a->id));
-        $this->assertTrue($this->is_member($b->id));
+    public function test_deleting_rule_removes_auto_members_on_sync(): void {
+        global $DB;
+        $user = $this->user('anna@partner-a.ch');
+        manager::delete_rule($DB->get_field(manager::TABLE_RULE, 'id', ['name' => 'Partner']));
+        // The cohort is no longer a rule cohort, but tracked memberships are still cleaned up.
+        manager::sync_all();
+        $this->assertTrue($DB->record_exists('cohort', ['id' => $this->partners]));
+        $this->assertSame(0, $DB->count_records(manager::TABLE, ['userid' => $user->id]));
     }
 
-    public function test_no_removal_when_disabled_setting(): void {
-        $a = $this->getDataGenerator()->create_user(['email' => 'anna@partner-a.ch']);
-        set_config('removeunmatched', 0, 'local_partnerdomains');
-        set_config('domains', '', 'local_partnerdomains');
+    public function test_no_suspension_when_action_none(): void {
+        $user = $this->user('x@example.org');
+        $this->assertFalse($this->is_suspended($user->id));
+    }
+
+    public function test_new_unmatched_user_is_suspended_and_notified(): void {
+        global $DB;
+        $this->enable_suspension();
+        $sink = $this->redirectEmails();
+
+        $user = $this->user('carl@example.org', ['firstname' => 'Carl']);
+
+        $this->assertTrue($this->is_suspended($user->id));
+        $this->assertTrue(manager::is_suspended_by_plugin($user->id));
+        $messages = $sink->get_messages();
+        $this->assertCount(1, $messages);
+        $this->assertSame('carl@example.org', $messages[0]->to);
+        $this->assertStringContainsString('Hello Carl (carl@example.org)', quoted_printable_decode($messages[0]->body));
+        $this->assertNotEmpty($DB->get_field(manager::TABLE_BLOCK, 'mailsent', ['userid' => $user->id]));
+
+        // No second mail on further syncs.
+        manager::sync_all();
+        manager::sync_user($user->id);
+        $this->assertCount(1, $sink->get_messages());
+    }
+
+    public function test_matching_users_are_not_suspended(): void {
+        $this->enable_suspension();
+        $this->assertFalse($this->is_suspended($this->user('anna@partner-a.ch')->id));
+        $this->assertFalse($this->is_suspended($this->user('ben@firma.ch')->id));
+    }
+
+    public function test_unconfirmed_user_is_suspended_only_after_confirmation(): void {
+        global $DB;
+        $this->enable_suspension();
+        $sink = $this->redirectEmails();
+        $user = $this->user('carl@example.org', ['confirmed' => 0]);
+        $this->assertFalse($this->is_suspended($user->id));
+        $this->assertCount(0, $sink->get_messages());
+
+        // What login/confirm.php does: confirm, then log in.
+        $DB->set_field('user', 'confirmed', 1, ['id' => $user->id]);
+        \core\event\user_loggedin::create(['userid' => $user->id, 'objectid' => $user->id,
+            'other' => ['username' => $user->username]])->trigger();
+
+        $this->assertTrue($this->is_suspended($user->id));
+        $this->assertCount(1, $sink->get_messages());
+    }
+
+    public function test_old_accounts_only_with_retro(): void {
+        $sink = $this->redirectEmails();
+        $old = $this->user('old@example.org', ['timecreated' => time() - DAYSECS]);
+        $this->enable_suspension(time() - HOURSECS);
 
         manager::sync_all();
-        $this->assertTrue($this->is_member($a->id));
+        $this->assertFalse($this->is_suspended($old->id));
+
+        $preview = manager::preview(true);
+        $this->assertSame(1, $preview['count']);
+        $this->assertSame((int) $old->id, (int) $preview['users'][0]->id);
+        $this->assertFalse($this->is_suspended($old->id), 'Preview must not change anything');
+
+        $stats = manager::sync_all(true);
+        $this->assertSame(1, $stats['suspended']);
+        $this->assertTrue($this->is_suspended($old->id));
+        $this->assertCount(1, $sink->get_messages());
+    }
+
+    public function test_exemptions(): void {
+        $this->enable_suspension();
+        $manual = $this->getDataGenerator()->create_user(['email' => 'manual@example.org', 'auth' => 'manual']);
+        $this->assertFalse($this->is_suspended($manual->id), 'Exempt auth method');
+
+        $admin = get_admin();
+        manager::sync_all(true);
+        $this->assertFalse($this->is_suspended($admin->id), 'Site admin');
+
+        $guest = guest_user();
+        $this->assertFalse($this->is_suspended($guest->id), 'Guest');
+    }
+
+    public function test_adding_domain_reactivates(): void {
+        global $DB;
+        $this->enable_suspension();
+        $user = $this->user('carl@newpartner.com');
+        $this->assertTrue($this->is_suspended($user->id));
+
+        $rule = $DB->get_record(manager::TABLE_RULE, ['name' => 'Partner']);
+        $rule->domains .= "\nnewpartner.com";
+        manager::save_rule($rule);
+        $stats = manager::sync_all();
+
+        $this->assertSame(1, $stats['reactivated']);
+        $this->assertFalse($this->is_suspended($user->id));
+        $this->assertTrue(cohort_is_member($this->partners, $user->id));
+        $this->assertFalse($DB->record_exists(manager::TABLE_BLOCK, ['userid' => $user->id]));
+    }
+
+    public function test_manual_cohort_membership_reactivates(): void {
+        $this->enable_suspension();
+        $user = $this->user('einzelfirma@gmail.com');
+        $this->assertTrue($this->is_suspended($user->id));
+
+        cohort_add_member($this->partners, $user->id);
+        $this->assertFalse($this->is_suspended($user->id));
+    }
+
+    public function test_manual_reactivation_is_respected(): void {
+        global $DB;
+        $this->enable_suspension();
+        $user = $this->user('carl@example.org');
+        $this->assertTrue($this->is_suspended($user->id));
+
+        // Administrator reactivates the account in the user profile.
+        user_update_user((object) ['id' => $user->id, 'suspended' => 0], false, true);
+        $this->assertFalse($this->is_suspended($user->id));
+        $this->assertSame('1', (string) $DB->get_field(manager::TABLE_BLOCK, 'exempt', ['userid' => $user->id]));
+
+        manager::sync_all(true);
+        $this->assertFalse($this->is_suspended($user->id));
+    }
+
+    public function test_foreign_suspension_is_not_touched(): void {
+        $this->enable_suspension();
+        $user = $this->user('anna@partner-a.ch');
+        user_update_user((object) ['id' => $user->id, 'suspended' => 1], false, true);
+        manager::sync_all(true);
+        $this->assertTrue($this->is_suspended($user->id), 'Suspended by an admin, not by the plugin');
+    }
+
+    public function test_release_user_and_release_all(): void {
+        $this->enable_suspension();
+        $a = $this->user('a@example.org');
+        $b = $this->user('b@example.org');
+        manager::release_user($a->id);
+        $this->assertFalse($this->is_suspended($a->id));
+        manager::sync_all(true);
+        $this->assertFalse($this->is_suspended($a->id), 'Released users stay exempt');
+
+        set_config('unmatchedaction', manager::ACTION_NONE, 'local_partnerdomains');
+        $this->assertSame(1, manager::release_all());
+        $this->assertFalse($this->is_suspended($b->id));
+    }
+
+    public function test_no_mail_when_disabled(): void {
+        set_config('sendmail', 0, 'local_partnerdomains');
+        $this->enable_suspension();
+        $sink = $this->redirectEmails();
+        $user = $this->user('carl@example.org');
+        $this->assertTrue($this->is_suspended($user->id));
+        $this->assertCount(0, $sink->get_messages());
+    }
+
+    public function test_action_changed_sets_blockfrom_once(): void {
+        set_config('unmatchedaction', manager::ACTION_SUSPEND, 'local_partnerdomains');
+        manager::action_changed();
+        $first = manager::get_blockfrom();
+        $this->assertGreaterThan(0, $first);
+        set_config('blockfrom', 123, 'local_partnerdomains');
+        manager::action_changed();
+        $this->assertSame(123, manager::get_blockfrom(), 'Saving again must not move the start time');
+
+        set_config('unmatchedaction', manager::ACTION_NONE, 'local_partnerdomains');
+        manager::action_changed();
+        set_config('unmatchedaction', manager::ACTION_SUSPEND, 'local_partnerdomains');
+        manager::action_changed();
+        $this->assertGreaterThan(123, manager::get_blockfrom(), 'Switching on again starts a new period');
+    }
+
+    public function test_switching_on_without_settings_page_starts_now(): void {
+        $old = $this->user('old@example.org', ['timecreated' => time() - DAYSECS]);
+        set_config('unmatchedaction', manager::ACTION_SUSPEND, 'local_partnerdomains');
+        manager::sync_all();
+        $this->assertFalse($this->is_suspended($old->id), 'Existing accounts are only affected by a retro run');
+        $this->assertGreaterThan(time() - MINSECS, manager::get_blockfrom());
+    }
+
+    public function test_rule_keeps_comments(): void {
+        global $DB;
+        $id = manager::save_rule((object) ['name' => 'C', 'domains' => "c-one.ch # Kunde 1\r\nc-two.ch",
+            'cohortid' => $this->staff, 'enabled' => 1]);
+        $this->assertSame("c-one.ch # Kunde 1\nc-two.ch", $DB->get_field(manager::TABLE_RULE, 'domains', ['id' => $id]));
+        $this->assertSame(['c-one.ch', 'c-two.ch'], manager::get_rules()[$id]->domainlist);
     }
 
     public function test_plugin_disabled_does_nothing(): void {
         set_config('enabled', 0, 'local_partnerdomains');
-        $user = $this->getDataGenerator()->create_user(['email' => 'anna@partner-a.ch']);
-        $this->assertFalse($this->is_member($user->id));
-        $this->assertTrue(manager::sync_all()['disabled']);
+        $this->enable_suspension();
+        $user = $this->user('anna@partner-a.ch');
+        $other = $this->user('carl@example.org');
+        $this->assertFalse(cohort_is_member($this->partners, $user->id));
+        $this->assertFalse($this->is_suspended($other->id));
     }
 
-    public function test_sync_all_backfills_existing_users(): void {
-        set_config('enabled', 0, 'local_partnerdomains');
-        $user = $this->getDataGenerator()->create_user(['email' => 'anna@partner-a.ch']);
-        set_config('enabled', 1, 'local_partnerdomains');
-
-        $stats = manager::sync_all();
-        $this->assertSame(1, $stats['added']);
-        $this->assertTrue($this->is_member($user->id));
-    }
-
-    public function test_manual_removal_clears_tracking(): void {
+    public function test_cohort_deletion_disables_rule(): void {
         global $DB;
-        $user = $this->getDataGenerator()->create_user(['email' => 'anna@partner-a.ch']);
-        cohort_remove_member(manager::get_cohort()->id, $user->id);
-        $this->assertFalse($DB->record_exists(manager::TABLE, ['userid' => $user->id]));
+        cohort_delete_cohort($DB->get_record('cohort', ['id' => $this->staff]));
+        $this->assertSame('0', (string) $DB->get_field(manager::TABLE_RULE, 'enabled', ['name' => 'Staff']));
+        $this->assertArrayNotHasKey('Staff', array_flip(array_map(fn($r) => $r->name, manager::get_rules())));
     }
 
-    public function test_deleted_user_tracking_is_cleaned(): void {
+    public function test_deleted_user_rows_are_cleaned(): void {
         global $DB;
-        $user = $this->getDataGenerator()->create_user(['email' => 'anna@partner-a.ch']);
-        delete_user($user);
+        $this->enable_suspension();
+        $a = $this->user('anna@partner-a.ch');
+        $b = $this->user('carl@example.org');
+        delete_user($DB->get_record('user', ['id' => $a->id]));
+        delete_user($DB->get_record('user', ['id' => $b->id]));
         manager::sync_all();
-        $this->assertFalse($DB->record_exists(manager::TABLE, ['userid' => $user->id]));
+        $this->assertFalse($DB->record_exists(manager::TABLE, ['userid' => $a->id]));
+        $this->assertFalse($DB->record_exists(manager::TABLE_BLOCK, ['userid' => $b->id]));
+    }
+
+    public function test_migrate_legacy_config(): void {
+        global $DB;
+        $DB->delete_records(manager::TABLE_RULE);
+        $cohortid = cohort_add_cohort((object) ['contextid' => \context_system::instance()->id, 'name' => 'Old partners']);
+        set_config('domains', "old-a.ch\nold-b.ch", 'local_partnerdomains');
+        set_config('cohortid', $cohortid, 'local_partnerdomains');
+
+        manager::migrate_legacy_config();
+
+        $rule = $DB->get_record(manager::TABLE_RULE, []);
+        $this->assertSame('Old partners', $rule->name);
+        $this->assertSame((int) $cohortid, (int) $rule->cohortid);
+        $this->assertSame("old-a.ch\nold-b.ch", $rule->domains);
+        $this->assertFalse(get_config('local_partnerdomains', 'domains'));
+        $this->assertFalse(get_config('local_partnerdomains', 'cohortid'));
     }
 
     public function test_cohort_sync_enrols_into_course(): void {
         global $DB;
         $course = $this->getDataGenerator()->create_course();
-        $plugin = enrol_get_plugin('cohort');
         $studentrole = $DB->get_record('role', ['shortname' => 'student']);
-        $plugin->add_instance($course, ['customint1' => manager::get_cohort()->id, 'roleid' => $studentrole->id]);
+        enrol_get_plugin('cohort')->add_instance($course, ['customint1' => $this->staff, 'roleid' => $studentrole->id]);
 
-        $user = $this->getDataGenerator()->create_user(['email' => 'anna@partner-a.ch']);
-        $this->assertTrue(is_enrolled(\context_course::instance($course->id), $user));
+        $staff = $this->user('ben@firma.ch');
+        $partner = $this->user('anna@partner-a.ch');
+        $context = \context_course::instance($course->id);
+        $this->assertTrue(is_enrolled($context, $staff));
+        $this->assertFalse(is_enrolled($context, $partner));
+    }
+
+    public function test_explain_email(): void {
+        $this->assertSame(['Partner'], manager::explain_email('x@partner-b.com')['rules']);
+        $this->assertTrue(manager::explain_email('x@gmail.com')['blocked']);
+        $this->assertNull(manager::explain_email('nonsense')['domain']);
     }
 }

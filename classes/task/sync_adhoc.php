@@ -19,7 +19,7 @@ namespace local_partnerdomains\task;
 use local_partnerdomains\manager;
 
 /**
- * One-off synchronisation, queued whenever the settings change.
+ * One-off synchronisation, queued when settings or rules change, or for the retroactive run.
  *
  * @package    local_partnerdomains
  * @copyright  2026 Fabian Kaiser
@@ -31,6 +31,11 @@ class sync_adhoc extends \core\task\adhoc_task {
      * Runs the synchronisation.
      */
     public function execute() {
-        manager::sync_all(new \text_progress_trace());
+        $data = $this->get_custom_data();
+        $retro = !empty($data->retro);
+        if ($retro) {
+            \core_php_time_limit::raise();
+        }
+        manager::sync_all($retro, new \text_progress_trace());
     }
 }

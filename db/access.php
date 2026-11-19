@@ -15,21 +15,23 @@
 // along with Moodle.  If not, see <https://www.gnu.org/licenses/>.
 
 /**
- * Post-install: create the "Verified partners" cohort.
+ * Capabilities.
  *
  * @package    local_partnerdomains
  * @copyright  2026 Fabian Kaiser
  * @license    https://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
-/**
- * Runs after the plugin tables have been created.
- *
- * @return bool
- */
-function xmldb_local_partnerdomains_install() {
-    set_config('enabled', 1, 'local_partnerdomains');
-    set_config('removeunmatched', 1, 'local_partnerdomains');
-    \local_partnerdomains\manager::get_cohort();
-    return true;
-}
+defined('MOODLE_INTERNAL') || die();
+
+$capabilities = [
+    // Manage rules, see the status page, reactivate suspended accounts. Settings remain admin-only.
+    'local/partnerdomains:manage' => [
+        'riskbitmask' => RISK_CONFIG | RISK_PERSONAL | RISK_DATALOSS,
+        'captype' => 'write',
+        'contextlevel' => CONTEXT_SYSTEM,
+        'archetypes' => [
+            'manager' => CAP_ALLOW,
+        ],
+    ],
+];

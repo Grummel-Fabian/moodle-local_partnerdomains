@@ -29,18 +29,32 @@ define('CLI_SCRIPT', true);
 require(__DIR__ . '/../../../config.php');
 require_once($CFG->libdir . '/clilib.php');
 
-[$options, $unrecognized] = cli_get_params(['help' => false], ['h' => 'help']);
+[$options, $unrecognized] = cli_get_params(
+    ['help' => false, 'retro' => false, 'preview' => false],
+    ['h' => 'help', 'r' => 'retro', 'p' => 'preview']
+);
 
 if ($options['help']) {
-    cli_writeln("Synchronises the partner cohort with the configured e-mail domains.
+    cli_writeln("Synchronises the rule cohorts with the configured e-mail domains.
 
 Options:
-  -h, --help    Show this help
+  -p, --preview   Only list the existing accounts a retroactive run would suspend
+  -r, --retro     Also suspend unmatched accounts created before suspension was switched on
+  -h, --help      Show this help
 
 Example:
-  sudo -u www-data php local/partnerdomains/cli/sync.php");
+  sudo -u www-data php local/partnerdomains/cli/sync.php --preview");
     exit(0);
 }
 
-$stats = \local_partnerdomains\manager::sync_all(new text_progress_trace());
+if ($options['preview']) {
+    $preview = \local_partnerdomains\manager::preview(true, PHP_INT_MAX);
+    foreach ($preview['users'] as $user) {
+        cli_writeln("{$user->id}\t{$user->auth}\t{$user->email}");
+    }
+    cli_writeln("{$preview['count']} accounts would be suspended.");
+    exit(0);
+}
+
+$stats = \local_partnerdomains\manager::sync_all((bool) $options['retro'], new text_progress_trace());
 exit($stats['disabled'] ? 1 : 0);

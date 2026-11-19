@@ -35,7 +35,11 @@ $observers = [
     ],
     [
         'eventname' => '\core\event\user_loggedin',
-        'callback'  => '\local_partnerdomains\observer::user_changed',
+        'callback'  => '\local_partnerdomains\observer::user_loggedin',
+    ],
+    [
+        'eventname' => '\core\event\cohort_member_added',
+        'callback'  => '\local_partnerdomains\observer::cohort_member_added',
     ],
     [
         'eventname' => '\core\event\cohort_member_removed',

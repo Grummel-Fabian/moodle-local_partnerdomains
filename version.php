@@ -25,7 +25,7 @@
 defined('MOODLE_INTERNAL') || die();
 
 $plugin->component = 'local_partnerdomains';
-$plugin->version   = 2026102100;
+$plugin->version   = 2026111900;
 $plugin->requires  = 2022112800; // Moodle 4.1 LTS.
 $plugin->maturity  = MATURITY_BETA;
-$plugin->release   = '0.1.0';
+$plugin->release   = '0.2.0';

@@ -17,32 +17,32 @@
 namespace local_partnerdomains;
 
 /**
- * Textarea setting that rejects malformed domains and public mail providers.
+ * Textarea setting for the list of blocked (public) mail domains.
  *
  * @package    local_partnerdomains
  * @copyright  2026 Fabian Kaiser
  * @license    https://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
-class admin_setting_domains extends \admin_setting_configtextarea {
+class admin_setting_blockeddomains extends \admin_setting_configtextarea {
 
     /**
-     * Validates the submitted list.
+     * Rejects entries that are not plain domains.
      *
      * @param string $data
-     * @return true|string True on success, error message otherwise.
+     * @return true|string
      */
     public function validate($data) {
         $parent = parent::validate($data);
         if ($parent !== true) {
             return $parent;
         }
-        $parsed = manager::parse_domains((string) $data);
-        if ($parsed['invalid']) {
-            return get_string('err_invaliddomains', 'local_partnerdomains', implode(', ', $parsed['invalid']));
+        $invalid = [];
+        foreach (preg_split('/[\s,;]+/', strtolower((string) $data)) as $entry) {
+            $entry = ltrim(trim($entry), '@');
+            if ($entry !== '' && (strpos($entry, '*') !== false || !preg_match(manager::RULE_PATTERN, $entry))) {
+                $invalid[] = $entry;
+            }
         }
-        if ($parsed['blocked']) {
-            return get_string('err_freemail', 'local_partnerdomains', implode(', ', $parsed['blocked']));
-        }
-        return true;
+        return $invalid ? get_string('err_invaliddomains', 'local_partnerdomains', implode(', ', $invalid)) : true;
     }
 }
