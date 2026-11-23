@@ -452,11 +452,22 @@ class manager {
         $userwhere = $userid ? ' AND userid = :userid' : '';
         $params = $userid ? ['userid' => $userid] : [];
 
-        // Memberships of all rule cohorts and automatic memberships of any cohort.
-        $ctx->members = [];
+        // Automatic memberships of any cohort (also of cohorts no longer used by a rule).
         $ctx->tracked = [];
-        if ($ctx->cohortids) {
-            [$insql, $inparams] = $DB->get_in_or_equal($ctx->cohortids, SQL_PARAMS_NAMED);
+        $trackedcohorts = [];
+        $rs = $DB->get_recordset_select(self::TABLE, '1 = 1' . $userwhere, $params, '', 'id, cohortid, userid');
+        foreach ($rs as $t) {
+            $ctx->tracked[(int) $t->userid][(int) $t->cohortid] = true;
+            $trackedcohorts[(int) $t->cohortid] = true;
+        }
+        $rs->close();
+
+        // Memberships of all rule cohorts and of all cohorts with automatic memberships, so that
+        // members can be removed again after a rule was deleted or its cohort changed.
+        $ctx->members = [];
+        $membercohorts = array_values(array_unique(array_merge($ctx->cohortids, array_keys($trackedcohorts))));
+        if ($membercohorts) {
+            [$insql, $inparams] = $DB->get_in_or_equal($membercohorts, SQL_PARAMS_NAMED);
             $rs = $DB->get_recordset_select('cohort_members', "cohortid $insql $userwhere",
                 $inparams + $params, '', 'id, cohortid, userid');
             foreach ($rs as $m) {
@@ -464,11 +475,6 @@ class manager {
             }
             $rs->close();
         }
-        $rs = $DB->get_recordset_select(self::TABLE, '1 = 1' . $userwhere, $params, '', 'id, cohortid, userid');
-        foreach ($rs as $t) {
-            $ctx->tracked[(int) $t->userid][(int) $t->cohortid] = true;
-        }
-        $rs->close();
 
         $ctx->blocks = [];
         $rs = $DB->get_recordset_select(self::TABLE_BLOCK, '1 = 1' . $userwhere, $params);
@@ -520,8 +526,8 @@ class manager {
                 if ($ismember) {
                     $plan->remove[] = $cohortid;
                 }
-            } else if ($ismember) {
-                // Manual member (or automatic member while removal is switched off).
+            } else if ($ismember && in_array($cohortid, $ctx->cohortids, true)) {
+                // Manual member of a rule cohort (or automatic member while removal is switched off).
                 $plan->allowed = true;
             }
         }
@@ -670,7 +676,8 @@ class manager {
     public static function sync_all(bool $retro = false, ?\progress_trace $trace = null): array {
         global $DB;
         $stats = ['checked' => 0, 'added' => 0, 'removed' => 0, 'suspended' => 0, 'reactivated' => 0,
-            'exempted' => 0, 'mailed' => 0, 'disabled' => false];
+            'exempted' => 0, 'mailed' => 0, 'failed' => 0, 'disabled' => false];
+        $firsterror = null;
         if (!self::is_enabled()) {
             $stats['disabled'] = true;
             if ($trace) {
@@ -688,7 +695,18 @@ class manager {
             foreach ($rs as $user) {
                 $stats['checked']++;
                 $seen[(int) $user->id] = true;
-                $done = self::apply($user, self::evaluate($user, $ctx, $retro), $ctx);
+                // A problem with one account must not stop the run for all others.
+                try {
+                    $done = self::apply($user, self::evaluate($user, $ctx, $retro), $ctx);
+                } catch (\Throwable $e) {
+                    $stats['failed']++;
+                    $message = "User {$user->id} ({$user->email}): " . $e->getMessage();
+                    $firsterror = $firsterror ?? $message;
+                    if ($trace) {
+                        $trace->output('ERROR ' . $message);
+                    }
+                    continue;
+                }
                 foreach ($done as $action) {
                     $stats[$action]++;
                 }
@@ -718,9 +736,23 @@ class manager {
         }
         if ($trace) {
             $trace->output("Checked {$stats['checked']}, added {$stats['added']}, removed {$stats['removed']}, "
-                . "suspended {$stats['suspended']}, reactivated {$stats['reactivated']}, mailed {$stats['mailed']}.");
+                . "suspended {$stats['suspended']}, reactivated {$stats['reactivated']}, mailed {$stats['mailed']}, "
+                . "failed {$stats['failed']}.");
         }
         return $stats;
+    }
+
+    /**
+     * Marks a task run as failed when single accounts could not be processed, so that the
+     * administrators are notified. All other accounts have been processed at that point.
+     *
+     * @param array $stats Result of {@see self::sync_all()}.
+     * @throws \moodle_exception
+     */
+    public static function fail_task_on_errors(array $stats): void {
+        if (!empty($stats['failed'])) {
+            throw new \moodle_exception('error_syncfailed', self::COMPONENT, '', $stats['failed']);
+        }
     }
 
     /**

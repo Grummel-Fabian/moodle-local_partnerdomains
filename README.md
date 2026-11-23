@@ -144,6 +144,10 @@ geändert hat. Die Privacy-API (Export und Löschung) ist implementiert.
 
 ## Versionen
 
+- **0.2.1:** Fehlerbehebung: Der nächtliche Abgleich brach in 0.2.0 sofort ab («Argument #1 ($retro)
+  must be of type bool»). Beim Löschen einer Regel werden automatisch hinzugefügte Mitglieder jetzt auch
+  aus der globalen Gruppe entfernt. Ein Fehler bei einem einzelnen Konto bricht den Abgleich nicht mehr ab;
+  das Konto wird im Task-Protokoll genannt.
 - **0.2.0:** Beliebig viele Regeln, Sperre und editierbare E-Mail für Konten ohne passende Regel,
   Hinweisseite, rückwirkende Ausführung mit Vorschau, Ausnahmen, Recht für Manager, anpassbare
   Freemail-Liste.

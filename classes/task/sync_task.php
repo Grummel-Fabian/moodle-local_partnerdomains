@@ -40,6 +40,7 @@ class sync_task extends \core\task\scheduled_task {
      * Runs the synchronisation.
      */
     public function execute() {
-        manager::sync_all(new \text_progress_trace());
+        $stats = manager::sync_all(false, new \text_progress_trace());
+        manager::fail_task_on_errors($stats);
     }
 }

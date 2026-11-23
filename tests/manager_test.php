@@ -166,6 +166,49 @@ final class manager_test extends \advanced_testcase {
         manager::sync_all();
         $this->assertTrue($DB->record_exists('cohort', ['id' => $this->partners]));
         $this->assertSame(0, $DB->count_records(manager::TABLE, ['userid' => $user->id]));
+        $this->assertFalse(cohort_is_member($this->partners, $user->id), 'Automatic member must leave the cohort');
+    }
+
+    public function test_deleting_rule_keeps_manual_members(): void {
+        global $DB;
+        $user = $this->user('einzelfirma@gmail.com');
+        cohort_add_member($this->partners, $user->id);
+        manager::delete_rule($DB->get_field(manager::TABLE_RULE, 'id', ['name' => 'Partner']));
+        manager::sync_all();
+        $this->assertTrue(cohort_is_member($this->partners, $user->id));
+    }
+
+    public function test_scheduled_task_runs(): void {
+        set_config('enabled', 0, 'local_partnerdomains');
+        $user = $this->user('anna@partner-a.ch');
+        set_config('enabled', 1, 'local_partnerdomains');
+
+        $this->expectOutputRegex('/Checked \\d+, added 1/');
+        (new task\sync_task())->execute();
+        $this->assertTrue(cohort_is_member($this->partners, $user->id));
+    }
+
+    public function test_adhoc_task_runs_normal_and_retro(): void {
+        $old = $this->user('old@example.org', ['timecreated' => time() - DAYSECS]);
+        $this->enable_suspension(time() - HOURSECS);
+
+        $this->expectOutputRegex('/suspended 0.*suspended 1/s');
+        $task = new task\sync_adhoc();
+        $task->set_custom_data(['retro' => false]);
+        $task->execute();
+        $this->assertFalse($this->is_suspended($old->id));
+
+        $task = new task\sync_adhoc();
+        $task->set_custom_data(['retro' => true]);
+        $task->execute();
+        $this->assertTrue($this->is_suspended($old->id));
+    }
+
+    public function test_task_failure_reporting(): void {
+        $this->assertSame(0, manager::sync_all()['failed']);
+        manager::fail_task_on_errors(['failed' => 0]);
+        $this->expectException(\moodle_exception::class);
+        manager::fail_task_on_errors(['failed' => 2]);
     }
 
     public function test_no_suspension_when_action_none(): void {

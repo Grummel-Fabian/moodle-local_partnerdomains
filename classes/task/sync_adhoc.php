@@ -36,6 +36,7 @@ class sync_adhoc extends \core\task\adhoc_task {
         if ($retro) {
             \core_php_time_limit::raise();
         }
-        manager::sync_all($retro, new \text_progress_trace());
+        $stats = manager::sync_all($retro, new \text_progress_trace());
+        manager::fail_task_on_errors($stats);
     }
 }

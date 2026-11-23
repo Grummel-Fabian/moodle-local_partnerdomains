@@ -50,6 +50,7 @@ $string['defaultmailbody'] = '<p>Guten Tag {fullname}</p>
 <p>If you believe you should have access, please contact {supportemail}.</p>
 <p>Kind regards<br>{sitename}</p>';
 $string['defaultmailsubject'] = 'Ihr Zugang zu {sitename} / Your access to {sitename}';
+$string['error_syncfailed'] = '{$a} accounts could not be processed. All other accounts were synchronised. The task log lists the affected accounts (lines starting with ERROR).';
 $string['err_freemail'] = 'Public mail providers are not allowed: {$a}. Add such users to the cohort manually instead.';
 $string['err_invaliddomains'] = 'Invalid entries: {$a}';
 $string['heading_general'] = 'General';

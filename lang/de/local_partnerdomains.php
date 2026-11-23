@@ -50,6 +50,7 @@ $string['defaultmailbody'] = '<p>Guten Tag {fullname}</p>
 <p>If you believe you should have access, please contact {supportemail}.</p>
 <p>Kind regards<br>{sitename}</p>';
 $string['defaultmailsubject'] = 'Ihr Zugang zu {sitename} / Your access to {sitename}';
+$string['error_syncfailed'] = '{$a} Konten konnten nicht verarbeitet werden. Alle anderen Konten wurden abgeglichen. Das Task-Protokoll nennt die betroffenen Konten (Zeilen mit ERROR).';
 $string['err_freemail'] = 'Öffentliche Mail-Anbieter sind nicht erlaubt: {$a}. Fügen Sie solche Benutzer stattdessen manuell der globalen Gruppe hinzu.';
 $string['err_invaliddomains'] = 'Ungültige Einträge: {$a}';
 $string['heading_general'] = 'Allgemein';
